@@ -1,0 +1,22 @@
+.uchikara-form-honeypot {
+  position: absolute !important;
+  left: -10000px !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+}
+
+.uchikara-form-turnstile {
+  display: flex;
+  justify-content: center;
+  margin: 24px 0;
+}
+
+.uchikara-static-form [type="submit"]:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.uchikara-static-form .wpcf7-response-output[role="status"] {
+  border-color: #46b450;
+}

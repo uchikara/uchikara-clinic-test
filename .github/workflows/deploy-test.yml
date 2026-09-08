@@ -1,0 +1,81 @@
+name: Validate and deploy TEST
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-site-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - run: npm run validate
+      - name: Check PHP syntax
+        run: git ls-files -z '*.php' | xargs -0 -r -n 1 php -l
+
+  deploy:
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.TEST_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Configure TEST-only SSH credentials
+        env:
+          SSH_KEY: ${{ secrets.TEST_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.TEST_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY"
+          test -n "$KNOWN_HOSTS"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Back up and upload tracked application files
+        env:
+          TEST_SSH_USER: ${{ secrets.TEST_SSH_USER }}
+        run: |
+          set -euo pipefail
+          [[ "$TEST_SSH_USER" =~ ^[a-zA-Z0-9_-]+$ ]]
+          HOST=sv933.xbiz.ne.jp
+          TARGET=/home/xb283133/uchikara-clinic.com/public_html/test.uchikara-clinic.com
+          BACKUP=/home/xb283133/backups/test-actions-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}
+          REMOTE="${TEST_SSH_USER}@${HOST}"
+          export RSYNC_RSH='ssh -p 10022 -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15'
+          # Refuse aliases/symlinks to another directory. Preserve a full pre-deploy copy.
+          ssh -p 10022 -o BatchMode=yes -o StrictHostKeyChecking=yes "$REMOTE" \
+            "set -eu; test \"\$(readlink -f '$TARGET')\" = '$TARGET'; test -f '$TARGET/index.html'; mkdir -m 700 '$BACKUP'; tar -czf '$BACKUP/site.tar.gz' -C '$TARGET' ."
+          git ls-files -z -- . ':!scripts' ':!.github' ':!.gitignore' ':!.gitattributes' ':!package.json' ':!package-lock.json' ':!AGENTS.md' ':!session_log' ':!reference' > /tmp/test-site-files
+          # No --delete: runtime data and server-only settings must survive deployment.
+          rsync -rt --from0 --files-from=/tmp/test-site-files \
+            --exclude='uploads/***' --exclude='storage/***' --exclude='data/***' \
+            --exclude='forms/config.php' --exclude='.env*' --exclude='*.sqlite*' \
+            --exclude='*.db' --exclude='*.sql*' \
+            ./ "$REMOTE:$TARGET/"
+      - name: Check public response
+        run: |
+          set -euo pipefail
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://test.uchikara-clinic.com/)
+          [[ "$status" == 200 || "$status" == 401 ]]
+          echo '### TEST upload completed' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Check the page and main features. HTTP 401 means access protection is enabled; it does not verify page rendering.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove temporary key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
